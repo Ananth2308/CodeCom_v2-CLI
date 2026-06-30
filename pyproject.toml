@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "codecom"
+version = "0.1.0"
+description = "CLI coding assistant powered by your own vLLM model"
+requires-python = ">=3.9"
+dependencies = [
+    "openai>=1.0.0",
+    "rich>=13.0.0",
+    "prompt_toolkit>=3.0.0",
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+codecom = "codecom.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["codecom*"]

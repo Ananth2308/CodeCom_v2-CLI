@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+myenv/
+venv/
+.venv/
+.env
+*.log
+.codecom_history
+.continue/
