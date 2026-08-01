@@ -25,7 +25,7 @@ def load_config(config_path: str = None) -> dict:
                      If None, checks CODECOM_CONFIG env var, then falls back to ./config.yaml.
 
     Returns:
-        dict with keys: api_base_url, model_name, api_key, max_tokens, temperature, system_prompt
+        dict with keys: api_base_url, model_name, api_key, max_tokens, temperature, system_prompt, working_directory
     """
     # Determine which config file to load
     if config_path is None:
@@ -42,10 +42,11 @@ def load_config(config_path: str = None) -> dict:
             "max_tokens": 4096,
             "temperature": 0.1,
             "system_prompt": "You are a helpful coding assistant with file system tools.",
+            "working_directory": os.environ.get("CODECOM_WORKING_DIR", None),
         }
 
-    # Load the YAML config file
-    with open(path, "r") as f:
+    # Load the YAML config file with UTF-8 encoding
+    with open(path, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
 
     # Apply defaults for any missing keys (makes config file partially optional)
@@ -54,5 +55,7 @@ def load_config(config_path: str = None) -> dict:
     config.setdefault("api_key", "token-abc123")
     config.setdefault("max_tokens", 4096)
     config.setdefault("temperature", 0.1)
+    config.setdefault("streaming", True)
+    config.setdefault("working_directory", None)
 
     return config

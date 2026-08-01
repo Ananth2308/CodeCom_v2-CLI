@@ -57,6 +57,9 @@ model_name: "your model name"
 
 # If you set --api-key in vLLM, put it here
 api_key: "token-abc123"
+
+# Optional: Set default working directory
+working_directory: "/path/to/your/project"
 ```
 
 Or use environment variables:
@@ -65,6 +68,7 @@ Or use environment variables:
 export VLLM_API_BASE="http://<your-ec2-public-ip>:8000/v1"
 export VLLM_MODEL="your model name"
 export VLLM_API_KEY="token-abc123"
+export CODECOM_WORKING_DIR="/path/to/your/project"
 ```
 
 ### 4. Run CodeCom

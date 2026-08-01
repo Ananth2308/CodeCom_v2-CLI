@@ -11,6 +11,15 @@ model_name: "your-model-name"
 # API key (must match --api-key flag in your vLLM server command)
 api_key: "your-api-key-here"
 
+# Default working directory (optional)
+# If specified, CodeCom will start in this directory by default
+# Can be overridden with --dir command line argument
+# Examples:
+#   working_directory: "/home/user/my-project"
+#   working_directory: "C:/Users/username/projects/my-app"
+# If not specified, uses the current directory where you run codecom
+# working_directory: "/path/to/your/project"
+
 # Maximum tokens for model responses
 max_tokens: 4096
 

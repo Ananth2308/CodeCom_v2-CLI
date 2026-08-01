@@ -16,8 +16,11 @@ The "always" option disables future prompts for that specific tool type
 """
 
 import json
+import difflib
 from rich.console import Console
 from rich.panel import Panel
+from rich.syntax import Syntax
+from rich.table import Table
 from prompt_toolkit import prompt
 from prompt_toolkit.formatted_text import HTML
 
@@ -80,34 +83,106 @@ def _format_action(tool_name: str, args: dict) -> str:
     """
     Format a tool action for display in the approval panel.
     Shows the relevant details based on tool type:
-    - edit_file: shows the file path and a diff-style view (old → new)
-    - write_file: shows the file path and content preview
+    - edit_file: shows the file path and a unified diff with syntax highlighting
+    - write_file: shows the file path and content preview with syntax highlighting
     - append_file: shows the file path and what's being appended
+    - delete_file: shows the file path being deleted
+    - rename_file: shows old path -> new path
+    - git_commit: shows commit message and files
     """
     if tool_name == "edit_file":
         path = args.get("path", "?")
         old = args.get("old_string", "")
         new = args.get("new_string", "")
-        return (
-            f"[bold]File:[/bold] {path}\n\n"
-            f"[red]- {old}[/red]\n"
-            f"[green]+ {new}[/green]"
-        )
+
+        # Create a unified diff for better visualization
+        old_lines = old.splitlines(keepends=True)
+        new_lines = new.splitlines(keepends=True)
+        diff = list(difflib.unified_diff(
+            old_lines,
+            new_lines,
+            fromfile=f"{path} (before)",
+            tofile=f"{path} (after)",
+            lineterm=""
+        ))
+
+        if diff:
+            # Format the diff with colors: red for removed, green for added
+            formatted_lines = []
+            for line in diff:
+                if line.startswith("---") or line.startswith("+++"):
+                    # File headers - make them dim
+                    formatted_lines.append(f"[dim]{line}[/dim]")
+                elif line.startswith("@@"):
+                    # Hunk headers - make them blue
+                    formatted_lines.append(f"[blue]{line}[/blue]")
+                elif line.startswith("-") and not line.startswith("---"):
+                    # Removed lines - red
+                    formatted_lines.append(f"[red]{line}[/red]")
+                elif line.startswith("+") and not line.startswith("+++"):
+                    # Added lines - green
+                    formatted_lines.append(f"[green]{line}[/green]")
+                else:
+                    # Context lines
+                    formatted_lines.append(line)
+
+            diff_text = "\n".join(formatted_lines)
+            # Limit diff size
+            if len(diff_text) > 2000:
+                diff_text = diff_text[:2000] + "\n[dim]... (diff truncated)[/dim]"
+        else:
+            diff_text = f"[red]- {old}[/red]\n[green]+ {new}[/green]"
+
+        return f"[bold]File:[/bold] {path}\n\n{diff_text}"
+
     elif tool_name == "write_file":
         path = args.get("path", "?")
         content = args.get("content", "")
-        # Only show first 500 chars to keep the panel manageable
-        preview = content[:500]
-        if len(content) > 500:
-            preview += "\n... (truncated)"
-        return f"[bold]File:[/bold] {path}\n[bold]Content:[/bold]\n{preview}"
+
+        # Detect file extension for syntax highlighting
+        ext = path.split(".")[-1] if "." in path else "txt"
+        lexer_map = {
+            "py": "python", "js": "javascript", "ts": "typescript",
+            "java": "java", "cpp": "cpp", "c": "c", "go": "go",
+            "rs": "rust", "rb": "ruby", "php": "php", "html": "html",
+            "css": "css", "json": "json", "yaml": "yaml", "yml": "yaml",
+            "xml": "xml", "md": "markdown", "sh": "bash", "sql": "sql"
+        }
+        lexer = lexer_map.get(ext, "text")
+
+        # Truncate content for preview
+        preview = content[:800]
+        truncated = len(content) > 800
+
+        result = f"[bold]File:[/bold] {path}\n[bold]Content:[/bold] ({len(content)} chars)\n\n"
+        result += preview
+        if truncated:
+            result += "\n\n... (content truncated, full content will be written)"
+
+        return result
+
     elif tool_name == "append_file":
         path = args.get("path", "?")
         content = args.get("content", "")
-        preview = content[:300]
-        if len(content) > 300:
+        preview = content[:400]
+        if len(content) > 400:
             preview += "\n... (truncated)"
-        return f"[bold]File:[/bold] {path}\n[bold]Appending:[/bold]\n{preview}"
+        return f"[bold]File:[/bold] {path}\n[bold]Appending:[/bold] ({len(content)} chars)\n\n{preview}"
+
+    elif tool_name == "delete_file":
+        path = args.get("path", "?")
+        return f"[bold red]⚠ DELETE FILE:[/bold red] {path}\n\n[yellow]This action cannot be undone![/yellow]"
+
+    elif tool_name == "rename_file":
+        old_path = args.get("old_path", "?")
+        new_path = args.get("new_path", "?")
+        return f"[bold]Rename/Move:[/bold]\n[red]From:[/red] {old_path}\n[green]To:[/green]   {new_path}"
+
+    elif tool_name == "git_commit":
+        message = args.get("message", "?")
+        files = args.get("files", "all staged files")
+        return f"[bold]Commit Message:[/bold]\n{message}\n\n[bold]Files:[/bold] {files}"
+
     else:
         # Fallback: just dump the raw args as JSON
         return json.dumps(args, indent=2)

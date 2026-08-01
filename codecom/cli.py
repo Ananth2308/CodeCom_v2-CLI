@@ -18,12 +18,15 @@ The response loop continues until either:
 import os
 import sys
 import json
+import re
 import argparse
 from pathlib import Path
 
 from rich.console import Console
 from rich.panel import Panel
 from rich.markdown import Markdown
+from rich.live import Live
+from rich.text import Text
 from prompt_toolkit import prompt
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
@@ -39,6 +42,66 @@ console = Console()
 HISTORY_FILE = Path.home() / ".codecom_history"
 
 
+def clean_tool_call_tags(text: str) -> str:
+    """
+    Remove tool call XML tags from text to keep output clean.
+    Removes patterns like:
+    - <tool_call>
+    - </tool_call>
+    - <function=read_file>
+    - </function>
+    - <parameter=path>value</parameter>
+    """
+    # Remove tool_call tags
+    text = re.sub(r'</?tool_call>', '', text)
+    # Remove function tags with attributes
+    text = re.sub(r'<function=[^>]+>', '', text)
+    text = re.sub(r'</function>', '', text)
+    # Remove parameter tags
+    text = re.sub(r'<parameter=[^>]+>', '', text)
+    text = re.sub(r'</parameter>', '', text)
+    return text
+
+
+def make_paths_clickable(text: str, working_dir: str) -> str:
+    """
+    Convert file paths in text to clickable file:// links using OSC 8 hyperlinks.
+    These are invisible - the path looks normal but is clickable.
+    Detects patterns like:
+    - path/to/file.py
+    - path/to/file.py:123
+    - codecom/cli.py:45
+    """
+    # Pattern to match file paths (with optional line numbers)
+    # Matches: word/word.ext or word/word.ext:123
+    pattern = r'\b([\w/\\.-]+\.(py|js|ts|java|cpp|c|go|rs|rb|php|html|css|json|yaml|yml|xml|md|txt|sh|sql))(?::(\d+))?\b'
+
+    def replacer(match):
+        filepath = match.group(1)
+        line_num = match.group(3)
+
+        # Check if file exists (relative to working dir)
+        full_path = Path(working_dir) / filepath
+        if full_path.exists():
+            # Convert Windows path to file:// URL format
+            # Windows: file:///C:/path/to/file.py
+            # Unix: file:///path/to/file.py
+            file_url = full_path.as_posix()
+            if file_url[1] == ':':  # Windows absolute path like C:/...
+                file_url = f"/{file_url}"
+
+            # OSC 8 hyperlink format: \033]8;;URL\033\\TEXT\033]8;;\033\\
+            # This makes TEXT clickable but doesn't show any link markup
+            display_text = f"{filepath}:{line_num}" if line_num else filepath
+            url = f"file://{file_url}:{line_num}" if line_num else f"file://{file_url}"
+
+            return f"\033]8;;{url}\033\\{display_text}\033]8;;\033\\"
+
+        return match.group(0)  # Return unchanged if file doesn't exist
+
+    return re.sub(pattern, replacer, text)
+
+
 def main():
     """
     Entry point for the CodeCom CLI.
@@ -47,16 +110,22 @@ def main():
     """
     parser = argparse.ArgumentParser(description="CodeCom V2 - CLI coding assistant")
     parser.add_argument("--config", "-c", help="Path to config.yaml", default=None)
-    parser.add_argument("--dir", "-d", help="Working directory", default=os.getcwd())
+    parser.add_argument("--dir", "-d", help="Working directory (overrides config)", default=None)
     parser.add_argument("--no-approval", action="store_true", help="Skip approval for destructive actions (dangerous)")
     args = parser.parse_args()
 
-    # Set the working directory (all file operations are relative to this)
-    working_dir = os.path.abspath(args.dir)
-    os.chdir(working_dir)
-
     # Load configuration from YAML file or environment variables
     config = load_config(args.config)
+
+    # Determine working directory with priority: CLI arg > config file > current directory
+    if args.dir:
+        working_dir = os.path.abspath(args.dir)
+    elif config.get("working_directory"):
+        working_dir = os.path.abspath(config["working_directory"])
+    else:
+        working_dir = os.getcwd()
+
+    os.chdir(working_dir)
 
     # Print the startup banner with connection info
     console.print(Panel(
@@ -79,20 +148,21 @@ def main():
         console.print(f"[red]  Check that your server is running at: {config['api_base_url']}[/red]")
         console.print("[dim]  Continuing anyway - you can fix the connection and try again.[/dim]\n")
 
-    console.print("[dim]Commands: /quit, /clear, /dir <path>, /help[/dim]\n")
+    console.print("[dim]Commands: /quit (/q), /clear (/c), /dir (/d) <path>, /help (/h)[/dim]\n")
 
     # Conversation history (list of message dicts maintained for the session)
     messages = []
     skip_approval = args.no_approval
+    use_streaming = config.get("streaming", True)
 
     try:
-        session_loop(client, messages, working_dir, skip_approval)
+        session_loop(client, messages, working_dir, skip_approval, use_streaming)
     except KeyboardInterrupt:
         console.print("\n[dim]Goodbye![/dim]")
         sys.exit(0)
 
 
-def session_loop(client: LLMClient, messages: list, working_dir: str, skip_approval: bool):
+def session_loop(client: LLMClient, messages: list, working_dir: str, skip_approval: bool, use_streaming: bool):
     """
     Main interactive loop. Reads user input, handles commands, and triggers responses.
 
@@ -122,7 +192,7 @@ def session_loop(client: LLMClient, messages: list, working_dir: str, skip_appro
 
         # Add user message to conversation and get a response
         messages.append({"role": "user", "content": user_input})
-        handle_response(client, messages, working_dir, skip_approval)
+        handle_response(client, messages, working_dir, skip_approval, use_streaming)
 
 
 def handle_command(command: str, messages: list, working_dir: str) -> bool:
@@ -138,10 +208,10 @@ def handle_command(command: str, messages: list, working_dir: str) -> bool:
     if cmd in ("/quit", "/exit", "/q"):
         console.print("[dim]Goodbye![/dim]")
         return False
-    elif cmd == "/clear":
+    elif cmd in ("/clear", "/c"):
         messages.clear()
         console.print("[green]Conversation cleared.[/green]\n")
-    elif cmd == "/dir":
+    elif cmd in ("/dir", "/d"):
         if len(parts) > 1:
             new_dir = os.path.abspath(parts[1])
             if os.path.isdir(new_dir):
@@ -151,12 +221,12 @@ def handle_command(command: str, messages: list, working_dir: str) -> bool:
                 console.print(f"[red]Not a directory: {parts[1]}[/red]\n")
         else:
             console.print(f"[cyan]Current directory: {os.getcwd()}[/cyan]\n")
-    elif cmd == "/help":
+    elif cmd in ("/help", "/h"):
         console.print(Panel(
-            "/quit      - Exit CodeCom\n"
-            "/clear     - Clear conversation history\n"
-            "/dir [path] - Show or change working directory\n"
-            "/help      - Show this help",
+            "/quit, /q       - Exit CodeCom\n"
+            "/clear, /c      - Clear conversation history\n"
+            "/dir, /d [path] - Show or change working directory\n"
+            "/help, /h       - Show this help",
             title="Commands",
             border_style="blue",
         ))
@@ -166,13 +236,93 @@ def handle_command(command: str, messages: list, working_dir: str) -> bool:
     return True
 
 
-def handle_response(client: LLMClient, messages: list, working_dir: str, skip_approval: bool):
-    """
-    The agentic response loop.
+def _handle_streaming_response(client: LLMClient, messages: list, working_dir: str = None) -> dict:
+    """Handle a streaming response from the model, displaying it in a live-updating panel."""
+    response_stream = client.chat(messages, stream=True)
 
-    Sends the conversation to the model, parses any tool calls from the response,
-    executes them (with approval for destructive ones), feeds results back, and
-    repeats until the model gives a final text answer.
+    # Accumulate text as it streams
+    accumulated_text = ""
+    response = None
+
+    # Create a live display with a panel
+    console.print()
+    with Live(
+        Panel(
+            Markdown(""),
+            title="[bold cyan]CodeCom[/bold cyan]",
+            border_style="cyan",
+            padding=(1, 2),
+        ),
+        console=console,
+        refresh_per_second=10,
+    ) as live:
+        for chunk in response_stream:
+            # Handle errors
+            if "error" in chunk:
+                live.stop()
+                console.print(f"[red]API Error: {chunk['error']}[/red]\n")
+                return None
+
+            # Handle streaming deltas (incremental text)
+            if "delta" in chunk:
+                accumulated_text += chunk["delta"]
+                # Clean tool call tags and make file paths clickable
+                display_text = clean_tool_call_tags(accumulated_text)
+                if working_dir:
+                    display_text = make_paths_clickable(display_text, working_dir)
+
+                # Update the live display with accumulated text rendered as Markdown
+                live.update(
+                    Panel(
+                        Markdown(display_text),
+                        title="[bold cyan]CodeCom[/bold cyan]",
+                        border_style="cyan",
+                        padding=(1, 2),
+                    )
+                )
+
+            # Handle final result
+            if chunk.get("done"):
+                response = chunk
+                break
+
+    return response
+
+
+def _handle_non_streaming_response(client: LLMClient, messages: list, working_dir: str = None) -> dict:
+    """Handle a non-streaming response from the model with a spinner."""
+    with console.status("[bold cyan]Thinking...[/bold cyan]", spinner="dots"):
+        response = client.chat(messages, stream=False)
+
+    # Handle API errors
+    if "error" in response:
+        console.print(f"[red]API Error: {response['error']}[/red]\n")
+        return None
+
+    # Display the model's text response (if any)
+    if response["content"]:
+        # Clean tool call tags and make file paths clickable
+        display_text = clean_tool_call_tags(response["content"])
+        if working_dir:
+            display_text = make_paths_clickable(display_text, working_dir)
+
+        console.print(Panel(
+            Markdown(display_text),
+            title="[bold cyan]CodeCom[/bold cyan]",
+            border_style="cyan",
+            padding=(1, 2),
+        ))
+
+    return response
+
+
+def handle_response(client: LLMClient, messages: list, working_dir: str, skip_approval: bool, use_streaming: bool = True):
+    """
+    The agentic response loop with streaming support.
+
+    Sends the conversation to the model, streams the response as it's generated,
+    parses any tool calls, executes them (with approval for destructive ones),
+    feeds results back, and repeats until the model gives a final text answer.
 
     Safety: limited to 15 rounds to prevent infinite loops.
     """
@@ -180,24 +330,17 @@ def handle_response(client: LLMClient, messages: list, working_dir: str, skip_ap
 
     for _ in range(max_tool_rounds):
         console.print()
-        # Show a spinner while waiting for the model's response
-        with console.status("[bold cyan]Thinking...[/bold cyan]", spinner="dots"):
-            response = client.chat(messages)
 
-        # Handle API errors
-        if "error" in response:
-            console.print(f"[red]API Error: {response['error']}[/red]\n")
+        # Get response (streaming or non-streaming)
+        if use_streaming:
+            response = _handle_streaming_response(client, messages, working_dir)
+        else:
+            response = _handle_non_streaming_response(client, messages, working_dir)
+
+        # If no response was received (error case)
+        if response is None:
             messages.pop()  # Remove the user message that caused the error
             return
-
-        # Display the model's text response (if any)
-        if response["content"]:
-            console.print(Panel(
-                Markdown(response["content"]),
-                title="[bold cyan]CodeCom[/bold cyan]",
-                border_style="cyan",
-                padding=(1, 2),
-            ))
 
         # If no tool calls, this is the final answer — stop the loop
         if not response["tool_calls"]:
@@ -220,8 +363,16 @@ def handle_response(client: LLMClient, messages: list, working_dir: str, skip_ap
                 console.print(f"[red]{tool_result}[/red]")
                 continue
 
-            # Show what tool is being called
-            console.print(f"[dim]→ Tool: {tool_name}({json.dumps(tool_args, indent=None)})[/dim]")
+            # Color-code tool calls based on type
+            if tool_name in DESTRUCTIVE_TOOLS:
+                tool_color = "yellow"
+            elif tool_name.startswith("git_"):
+                tool_color = "blue"
+            else:
+                tool_color = "green"
+
+            # Show what tool is being called with color coding
+            console.print(f"[dim]→ Tool: [{tool_color}]{tool_name}[/{tool_color}]({json.dumps(tool_args, indent=None)})[/dim]")
 
             # Check approval for destructive tools
             if not skip_approval:

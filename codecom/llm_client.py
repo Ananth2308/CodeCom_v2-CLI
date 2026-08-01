@@ -70,21 +70,18 @@ class LLMClient:
         self.temperature = config.get("temperature", 0.1)
         self.system_prompt = config.get("system_prompt", "You are a helpful coding assistant.")
 
-    def chat(self, messages: list, use_tools: bool = True) -> dict:
+    def chat(self, messages: list, use_tools: bool = True, stream: bool = False):
         """
         Send a conversation to the model and parse the response.
 
         Args:
             messages: List of message dicts [{"role": "user/assistant", "content": "..."}]
             use_tools: Whether to include tool instructions (always True for now)
+            stream: If True, returns a generator that yields chunks; if False, returns dict
 
         Returns:
-            dict with keys:
-                - content: The model's text response (with tool_call blocks stripped out)
-                - tool_calls: List of parsed tool calls [{id, name, arguments}]
-                - finish_reason: Why the model stopped (stop, length, etc.)
-                - raw_content: Original unmodified model output
-                - error: (only present if request failed) Error message string
+            If stream=False: dict with keys content, tool_calls, finish_reason, raw_content, error
+            If stream=True: generator that yields dicts with "delta" key for incremental text
         """
         # Prepend the system prompt to the conversation
         full_messages = [{"role": "system", "content": self.system_prompt}] + messages
@@ -96,10 +93,21 @@ class LLMClient:
                 messages=full_messages,
                 max_tokens=self.max_tokens,
                 temperature=self.temperature,
+                stream=stream,
             )
         except Exception as e:
-            return {"error": str(e)}
+            if stream:
+                yield {"error": str(e)}
+                return
+            else:
+                return {"error": str(e)}
 
+        # Streaming mode: yield chunks as they arrive
+        if stream:
+            yield from self._handle_streaming_response(response)
+            return
+
+        # Non-streaming mode: process complete response
         choice = response.choices[0]
         raw_content = choice.message.content or ""
 
@@ -158,6 +166,45 @@ class LLMClient:
             })
 
         return tool_calls
+
+    def _handle_streaming_response(self, stream):
+        """
+        Process a streaming response from the vLLM server.
+        Accumulates chunks and yields them, then yields final parsed result.
+
+        Yields:
+            Dicts with either:
+            - {"delta": "text"} for each chunk of text
+            - {"content": ..., "tool_calls": ..., ...} for the final result
+        """
+        accumulated_content = ""
+
+        try:
+            for chunk in stream:
+                if not chunk.choices:
+                    continue
+
+                delta = chunk.choices[0].delta
+                if delta.content:
+                    text = delta.content
+                    accumulated_content += text
+                    yield {"delta": text}
+
+            # After streaming completes, parse tool calls from accumulated content
+            tool_calls = self._parse_tool_calls(accumulated_content)
+            clean_content = TOOL_CALL_PATTERN.sub("", accumulated_content).strip()
+
+            # Yield final result
+            yield {
+                "role": "assistant",
+                "content": clean_content,
+                "tool_calls": tool_calls,
+                "finish_reason": "stop",
+                "raw_content": accumulated_content,
+                "done": True,
+            }
+        except Exception as e:
+            yield {"error": str(e), "done": True}
 
     def test_connection(self) -> bool:
         """

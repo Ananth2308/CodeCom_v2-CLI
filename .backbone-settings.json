@@ -1,0 +1,16 @@
+{
+  "projectName": "codecom_V2",
+  "projectType": "brownfield",
+  "sdlcPhases": ["analysis", "planning", "solutioning", "implementation", "testing", "deployment"],
+  "sdlcDepth": "full",
+  "technicalStack": {
+    "frontend": ["other"],
+    "backend": ["python"]
+  },
+  "cloudProviders": ["aws"],
+  "integrations": ["github"],
+  "needsSecurityAuditing": true,
+  "needsBrandCompliance": false,
+  "needsDocumentGeneration": false,
+  "needsAccessibility": false
+}
